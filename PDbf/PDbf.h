@@ -5,7 +5,9 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <algorithm>
 #include <assert.h>
+#include <time.h>
 
 // DBF接口
 class CIDbf
@@ -24,7 +26,7 @@ public:
     virtual bool IsOpen() = NULL;
 
     // 打开文件
-    virtual int Open(const std::string& strFile, bool bReadOnly = false) = NULL;
+    virtual int Open(const std::string& strFile, bool bReadOnly = true) = NULL;
 
     // 关闭DBF文件
     virtual void Close() = NULL;
@@ -34,19 +36,45 @@ public:
 
     // 文件记录行
     virtual size_t GetRecNum() = NULL;
+    // 字段数
+    virtual size_t GetFieldNum() = NULL;
 
     // 读取文件记录
     // 读取记录行到缓存
     virtual int Read(int nRecNo, int nRecNum) = NULL;
-
     // 设置读指针, 从0开始, 缓存记录行行数
     virtual int ReadGo(int nRec) = NULL;
-
     // 读取字段
     virtual int ReadString(const std::string& strName, std::string& strValue) = NULL;
     virtual int ReadDouble(const std::string& strName, double& fValue) = NULL;
     virtual int ReadInt(const std::string& strName, int& nValue) = NULL;
-    virtual int ReadLong(const std::string& strName, int& nValue) = NULL;
+    virtual int ReadLong(const std::string& strName, long& nValue) = NULL;
+    virtual int ReadString(size_t nCol, std::string& strValue) = NULL;
+    virtual int ReadDouble(size_t nCol, double& fValue) = NULL;
+    virtual int ReadInt(size_t nCol, int& nValue) = NULL;
+    virtual int ReadLong(size_t nCol, long& nValue) = NULL;
+
+    // 写文件记录
+    // 清空数据
+    virtual int Zap() = NULL;
+    // 申请写入数据
+    virtual int PrepareAppend(size_t nRecNum) = NULL;
+    // 提交写数据数据到文件
+    virtual int WriteCommit() = NULL;
+    // 提交写入的数据到文件
+    virtual int FileCommit() = NULL;
+    // 设置写指针, 从0开始, 缓存记录行行数
+    virtual int WriteGo(int nRec) = NULL;
+    // 根据字段名写字段数据
+    virtual int WriteString(const std::string& strName, std::string& strValue) = NULL;
+    virtual int WriteDouble(const std::string& strName, double& fValue) = NULL;
+    virtual int WriteInt(const std::string& strName, int& nValue) = NULL;
+    virtual int WriteLong(const std::string& strName, long& nValue) = NULL;
+    // 根据索引写
+    virtual int WriteString(size_t nCol, std::string& strValue) = NULL;
+    virtual int WriteDouble(size_t nCol, double& fValue) = NULL;
+    virtual int WriteInt(size_t nCol, int& nValue) = NULL;
+    virtual int WriteLong(size_t nCol, long& nValue) = NULL;
 
     // 字符串函数
     static std::string Ltrim(const std::string& s)
@@ -88,6 +116,7 @@ class CPDbf : public CIDbf
 public:
     // 构造函数
     CPDbf()
+        :m_cBlank(' ')
     {
         // 文件句柄
         m_pFile = NULL;
@@ -100,9 +129,8 @@ public:
         // 文件行缓存
         m_pWriteBuf = NULL;
         m_pReadBuf = NULL;
-        // 当前行
-        m_pCurRow = NULL;
         m_bReadOnly = true;
+        m_nApeendMaxRec = 0;
     }
     ~CPDbf()
     {
@@ -113,7 +141,7 @@ public:
     inline bool IsOpen() { return m_pFile != NULL; }
 
     // 打开文件
-    int Open(const std::string& strFile, bool bReadOnly = false)
+    int Open(const std::string& strFile, bool bReadOnly = true)
     {
         // 检查是否已打开
         if (IsOpen())
@@ -139,12 +167,21 @@ public:
 
         // 变量初始化
         m_nCurRec = 0;
+        m_nApeendMaxRec = 0;
+        m_strFilePath = strFile;
         return DBF_SUCC;
     }
 
     // 关闭DBF文件
     void Close()
     {
+        // 关闭文件句柄
+        if (m_pFile)
+        {
+            fclose(m_pFile);
+            m_pFile = NULL;
+        }
+
         // 内存清理
         delete m_pWriteBuf;
         m_pWriteBuf = NULL;
@@ -154,16 +191,73 @@ public:
 
         delete[] m_pFileBuf;
         m_pFileBuf = NULL;
+    }
 
-        delete[] m_pCurRow;
-        m_pCurRow = NULL;
-
-        // 关闭文件句柄
-        if(m_pFile)
+    // 清空数据
+    int Zap()
+    {
+        if (!IsOpen() || m_pFileBuf)
         {
-            fclose(m_pFile);
-            m_pFile = NULL;
+            return DBF_ERROR;
         }
+
+        // 关闭文件
+        fclose(m_pFile);
+        m_pFile = fopen(m_strFilePath.c_str(), "wb");
+        if (!m_pFile)
+        {
+            return DBF_FILE_ERROR;
+        }
+        int yy, mm, dd;
+        this->GetCurDate(yy, mm, dd);
+        m_oHeader.cYy = yy % 100;
+        m_oHeader.cMm = mm;
+        m_oHeader.cDd = dd;
+        m_oHeader.nRecNum = 0;
+        
+        // 写入头
+        int nWrite = fwrite(&m_oHeader, 1, sizeof(m_oHeader), m_pFile);
+        if (nWrite != sizeof(m_oHeader))
+        {
+            return DBF_FILE_ERROR;
+        }
+        // 写入字段信息
+        for (size_t i = 0; i < m_vecField.size(); i++)
+        {
+            nWrite = fwrite(&m_vecField[i], 1, sizeof(m_vecField[i]), m_pFile);
+            if (nWrite != sizeof(m_vecField[i]))
+            {
+                return DBF_FILE_ERROR;
+            }
+        }
+        // 写入结束标志
+        const char cHeadEndFlag = 0X0D;
+        if (fwrite(&cHeadEndFlag, 1, sizeof(cHeadEndFlag), m_pFile) != sizeof(cHeadEndFlag))
+        {
+            return DBF_FILE_ERROR;
+        }
+        // 备注信息
+        if (m_nRemarkLen)
+        {
+            char* pRemark = new char[m_nRemarkLen];
+            memset(pRemark, 0, m_nRemarkLen);
+            nWrite = fwrite(pRemark, 1, m_nRemarkLen, m_pFile);
+            delete[] pRemark;
+            if (nWrite  != m_nRemarkLen)
+            {
+                return DBF_FILE_ERROR;
+            }
+        }
+        // 文件结束
+        const char cFileEndFlag = 0X1A;
+        if (fwrite(&cFileEndFlag, 1, sizeof(cFileEndFlag), m_pFile) != sizeof(cFileEndFlag))
+        {
+            return DBF_FILE_ERROR;
+        }
+        // 默认值
+        m_nCurRec = 0;
+        m_nApeendMaxRec = 0;
+        return DBF_SUCC;
     }
 
     // 设置内存模式(文件全部加载到内存)
@@ -180,6 +274,7 @@ public:
         size_t nSize = m_oHeader.nHeaderLen + m_oHeader.nRecNum*m_oHeader.nRecLen + 1;
         // 预新增数据大小
         nSize += nAppendRow * m_oHeader.nRecLen;
+        m_nApeendMaxRec = nAppendRow;
         m_pFileBuf = new char[nSize];
         // 读取文件数据到内容
         fseek(m_pFile, 0, SEEK_SET);
@@ -193,10 +288,16 @@ public:
 
     // 文件记录行
     inline size_t GetRecNum() { return m_oHeader.nRecNum; }
+    // 字段数
+    inline size_t GetFieldNum() { return m_vecField.size(); }
 
     // 读取记录行到缓存
     int Read(int nRecNo, int nRecNum)
     {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
         // 检查跳转记录行
         if (!IsValidRecNo(nRecNo + nRecNum) || Go(nRecNo))
         {
@@ -229,54 +330,365 @@ public:
     // 设置读指针, 从0开始, 缓存记录行行数
     int ReadGo(int nRec)
     {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
         if (!m_pReadBuf)
         {
             return DBF_PARA_ERROR;
         }
-        if (!m_pReadBuf->Go(nRec))
+        if (!m_pReadBuf->ReadGo(nRec))
         {
             return DBF_PARA_ERROR;
         }
         return DBF_SUCC;
     }
 
-    // 读取字段
+    // 读取字段,按字段名
     int ReadString(const std::string& strName, std::string& strValue)
     {
-        return ReadField(strName, strValue);
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        std::map<std::string, size_t>::iterator e = m_mapField.find(strName);
+        if (e == m_mapField.end())
+        {
+            return DBF_PARA_ERROR;
+        }
+        return ReadString(e->second, strValue);
     }
     int ReadDouble(const std::string& strName, double& fValue)
     {
-        std::string strValue;
-        int nRet = ReadField(strName, strValue);
-        if (nRet)
+        if (!IsOpen())
         {
-            return nRet;
+            return DBF_FILE_ERROR;
         }
-        fValue = atof(strValue.c_str());
-        return DBF_SUCC;
+        std::map<std::string, size_t>::iterator e = m_mapField.find(strName);
+        if (e == m_mapField.end())
+        {
+            return DBF_PARA_ERROR;
+        }
+        return ReadDouble(e->second, fValue);
     }
     int ReadInt(const std::string& strName, int& nValue)
     {
-        std::string strValue;
-        int nRet = ReadField(strName, strValue);
-        if (nRet)
+        if (!IsOpen())
         {
-            return nRet;
+            return DBF_FILE_ERROR;
         }
-        nValue = atoi(strValue.c_str());
+        std::map<std::string, size_t>::iterator e = m_mapField.find(strName);
+        if (e == m_mapField.end())
+        {
+            return DBF_PARA_ERROR;
+        }
+        return ReadInt(e->second, nValue);
+    }
+    int ReadLong(const std::string& strName, long& nValue)
+    {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        std::map<std::string, size_t>::iterator e = m_mapField.find(strName);
+        if (e == m_mapField.end())
+        {
+            return DBF_PARA_ERROR;
+        }
+        return ReadLong(e->second, nValue);
+    }
+    // 读取字段，按字段号
+    int ReadString(size_t nCol, std::string& strValue)
+    {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        if (ReadField(nCol, strValue))
+        {
+            return DBF_ERROR;
+        }
         return DBF_SUCC;
     }
-    int ReadLong(const std::string& strName, int& nValue)
+    int ReadDouble(size_t nCol, double& fValue)
     {
-        std::string strValue;
-        int nRet = ReadField(strName, strValue);
-        if (nRet)
+        if (!IsOpen())
         {
-            return nRet;
+            return DBF_FILE_ERROR;
         }
-        nValue = atol(strValue.c_str());
+        std::string strField;
+        if (ReadField(nCol, strField))
+        {
+            return DBF_ERROR;
+        }
+        fValue = atof(strField.c_str());
         return DBF_SUCC;
+    }
+    int ReadInt(size_t nCol, int& nValue)
+    {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        std::string strField;
+        if (ReadField(nCol, strField))
+        {
+            return DBF_ERROR;
+        }
+        nValue = atoi(strField.c_str());
+        return DBF_SUCC;
+    }
+    int ReadLong(size_t nCol, long& nValue)
+    {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        std::string strField;
+        if (ReadField(nCol, strField))
+        {
+            return DBF_ERROR;
+        }
+        nValue = atol(strField.c_str());
+        return DBF_SUCC;
+    }
+
+    // 申请写入数据
+    int PrepareAppend(size_t nRecNum)
+    {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        // 检查跳转记录行
+        if (nRecNum == 0)
+        {
+            return DBF_PARA_ERROR;
+        }
+        // 内存模式写记录数检查
+        if (m_pFileBuf && nRecNum >= m_nApeendMaxRec)
+        {
+            return DBF_PARA_ERROR;
+        }
+        size_t nSize = nRecNum * m_oHeader.nRecLen;
+        // 如果写读缓存不够，销毁缓存
+        if (m_pWriteBuf)
+        {
+            if (nSize > m_pWriteBuf->BufSize())
+            {
+                delete m_pWriteBuf;
+                m_pWriteBuf = NULL;
+            }
+        }
+        // 分配读内存
+        if (!m_pWriteBuf)
+        {
+            m_pWriteBuf = new CRecordBuf(nRecNum, m_oHeader.nRecLen);
+        }
+        m_pWriteBuf->WriteReset();
+        return DBF_SUCC;
+    }
+
+    // 提交写数据数据到文件
+    int WriteCommit()
+    {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        if (m_bReadOnly)
+        {
+            return DBF_PARA_ERROR;
+        }
+
+        if (!m_pWriteBuf)
+        {
+            return DBF_PARA_ERROR;
+        }
+
+        // 写缓存不为空，拷贝数据
+        if (m_pWriteBuf->IsEmpty())
+        {
+            return DBF_SUCC;
+        }
+
+        // 设置写指针
+        if (Go(m_oHeader.nRecNum))
+        {
+            return DBF_ERROR;
+        }
+        // 写入数据记录
+        size_t nAppendSize = m_pWriteBuf->Size() * m_pWriteBuf->RecLen();
+        size_t nWrite = _write(m_pWriteBuf->Data(), 1, nAppendSize);
+        if (nAppendSize != nWrite)
+        {
+            return DBF_ERROR;
+        }
+
+        // 更新头数据
+        m_oHeader.nRecNum += m_pWriteBuf->Size();
+        int yy, mm, dd;
+        this->GetCurDate(yy, mm, dd);
+        m_oHeader.cYy = yy%100;
+        m_oHeader.cMm = mm;
+        m_oHeader.cDd = dd;
+        if (WriteHeader())
+        {
+            return DBF_ERROR;
+        }
+        // 当前行更新
+        m_nCurRec = m_oHeader.nRecNum;
+        return DBF_SUCC;
+    }
+    // 提交写入的数据到文件
+    int FileCommit()
+    {
+        if (!IsOpen() || m_bReadOnly)
+        {
+            return DBF_PARA_ERROR;
+        }
+        // 写入文件结束标志
+        if (WriteEndFlag())
+        {
+            return DBF_ERROR;
+        }
+
+        // 如果是文件模式，写入整个对象到文件
+        if (!m_bReadOnly && m_pFileBuf)
+        {
+            fseek(m_pFile, 0, SEEK_SET);
+            int nWrite = fwrite(m_pFileBuf, 1, this->FileSize(), m_pFile);
+            if (nWrite != this->FileSize())
+            {
+                return DBF_ERROR;
+            }
+        }
+        return DBF_SUCC;
+    }
+
+    // 设置写指针, 从0开始, 缓存记录行行数
+    int WriteGo(int nRec)
+    {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        if (!m_pWriteBuf)
+        {
+            return DBF_PARA_ERROR;
+        }
+        if (!m_pWriteBuf->WriteGo(nRec))
+        {
+            return DBF_PARA_ERROR;
+        }
+        return DBF_SUCC;
+    }
+
+    // 根据字段名写字段数据
+    int WriteString(const std::string& strName, std::string& strValue)
+    {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        std::map<std::string, size_t>::iterator e = m_mapField.find(strName);
+        if (e == m_mapField.end())
+        {
+            return DBF_PARA_ERROR;
+        }
+        return WriteString(e->second, strValue);
+    }
+    int WriteDouble(const std::string& strName, double& fValue)
+    {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        std::map<std::string, size_t>::iterator e = m_mapField.find(strName);
+        if (e == m_mapField.end())
+        {
+            return DBF_PARA_ERROR;
+        }
+        return WriteDouble(e->second, fValue);
+    }
+    int WriteInt(const std::string& strName, int& nValue)
+    {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        std::map<std::string, size_t>::iterator e = m_mapField.find(strName);
+        if (e == m_mapField.end())
+        {
+            return DBF_PARA_ERROR;
+        }
+        return WriteInt(e->second, nValue);
+    }
+    int WriteLong(const std::string& strName, long& nValue)
+    {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        std::map<std::string, size_t>::iterator e = m_mapField.find(strName);
+        if (e == m_mapField.end())
+        {
+            return DBF_PARA_ERROR;
+        }
+        return WriteLong(e->second, nValue);
+    }
+    // 根据索引写
+    int WriteString(size_t nCol, std::string& strValue)
+    {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        return WriteField(nCol, strValue);
+    }
+    int WriteDouble(size_t nCol, double& fValue)
+    {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        if (nCol >= m_vecField.size())
+        {
+            return DBF_PARA_ERROR;
+        }
+        TDbfField& oField = m_vecField[nCol];
+        char szBuf[64] = { 0 };
+        sprintf_s(szBuf, "%%%d.%df", (int)oField.cLength, (int)oField.cPrecisionLength);
+        return WriteField(nCol, szBuf);
+    }
+    int WriteInt(size_t nCol, int& nValue)
+    {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        if (nCol >= m_vecField.size())
+        {
+            return DBF_PARA_ERROR;
+        }
+        char szBuf[64] = { 0 };
+        sprintf_s(szBuf, "%d", nValue);
+        return WriteField(nCol, szBuf);
+    }
+    int WriteLong(size_t nCol, long& nValue)
+    {
+        if (!IsOpen())
+        {
+            return DBF_FILE_ERROR;
+        }
+        if (nCol >= m_vecField.size())
+        {
+            return DBF_PARA_ERROR;
+        }
+        char szBuf[64] = { 0 };
+        sprintf_s(szBuf, "%ld", nValue);
+        return WriteField(nCol, szBuf);
     }
 
 protected:
@@ -301,7 +713,6 @@ protected:
     // 读取数据原始字段
     int ReadField(const std::string& strName, std::string& strValue)
     {
-        int nRet = DBF_SUCC;
         if (!m_pReadBuf || m_pReadBuf->IsEmpty())
         {
             return DBF_ERROR;
@@ -325,6 +736,40 @@ protected:
         // 获取字段信息
         char* pField = m_pReadBuf->GetCurRow() + m_vecField[nField].nPosition;
         strValue = std::string(pField, m_vecField[nField].cLength);
+        return nRet;
+    }
+
+    // 写数据字段信息
+    int WriteField(const std::string& strName, const std::string& strValue)
+    {
+        if (!m_pWriteBuf)
+        {
+            return DBF_ERROR;
+        }
+        // 获取字段位置
+        size_t nField = FindField(strName);
+        return WriteField(nField, strValue);
+    }
+    int WriteField(size_t nField, const std::string& strValue)
+    {
+        int nRet = DBF_SUCC;
+        // 检查字段位置
+        if (nField >= m_vecField.size())
+        {
+            return DBF_PARA_ERROR;
+        }
+        // 获取字段信息
+        char* pField = m_pWriteBuf->GetCurRow();
+        pField += m_vecField[nField].nPosition;
+        size_t nMaxFieldSize = m_vecField[nField].cLength;
+        // 置字段为空
+        memset(pField, m_cBlank, nMaxFieldSize);
+        // 拷贝字段数据
+        size_t nSize =  std::min(nMaxFieldSize, strValue.size());
+        if (!memcpy(pField, strValue.c_str(), nSize))
+        {
+            nRet = DBF_ERROR;
+        }
         return nRet;
     }
 
@@ -411,7 +856,7 @@ protected:
             return m_nRecCapacity * m_nRecLen;
         }
         // 设置当前行，从0开始
-        inline bool Go(size_t nRec)
+        inline bool ReadGo(size_t nRec)
         {
             if (nRec >= m_nRecNum)
             {
@@ -419,6 +864,22 @@ protected:
             }
             m_nCurRec = nRec;
             return true;
+        }
+        // 设置当前行，从0开始
+        inline bool WriteGo(size_t nRec)
+        {
+            if (nRec >= m_nRecCapacity)
+            {
+                return false;
+            }
+            m_nCurRec = nRec;
+            m_nRecNum = std::max(nRec+1, m_nRecNum);
+            return true;
+        }
+        inline void WriteReset()
+        {
+            m_nCurRec = 0;
+            m_nRecNum = 0;
         }
         // 获取当前行数据
         char* GetCurRow()
@@ -625,6 +1086,21 @@ private:
         return nRet;
     }
 
+    // 获取当前时间
+    void GetCurDate(int& nYear, int& nMon, int& nDay)
+    {
+        time_t t = time(0);
+        struct tm tmTime = { 0 };
+#if 1
+        localtime_s(&tmTime, &t);
+#else
+        tmTime = *localtime(&t);
+#endif
+        nYear = (tmTime.tm_year + 1900)%100;
+        nMon = tmTime.tm_mon + 1;
+        nDay = tmTime.tm_mday;
+    }
+
 protected:
     // 读取记录行函数，不允许跨文件数据与缓存数据读取，且读取数据时必须按行读取
     virtual size_t _read(void* ptr, size_t size, size_t nmemb)
@@ -650,12 +1126,12 @@ protected:
             }
             else
             {
-                // 切换到对应记录行
+                // 切换到对应文件记录行
                 fseek(m_pFile, nCurOffset, SEEK_SET);
                 return fread(ptr, size, nmemb, m_pFile);
             }
         }
-        // 从缓存行读取数据
+        // 从缓存行读取数据，写缓存行
         else if(m_pWriteBuf)
         {
             char* pData = m_pWriteBuf->Data() + (m_nCurRec - m_oHeader.nRecNum)*m_oHeader.nRecLen;
@@ -674,10 +1150,85 @@ protected:
         }
         return nRet;
     }
-    virtual size_t _write()
+    // 写入记录行函数，不允许跨文件数据与缓存数据操作，且操作数据时必须按行
+    virtual size_t _write(void* ptr, size_t size, size_t nmemb)
     {
         int nRet = DBF_SUCC;
         assert(IsOpen());
+        if (m_bReadOnly)
+        {
+            return DBF_PARA_ERROR;
+        }
+        // 判断行数
+        if (m_nCurRec <= m_oHeader.nRecNum)
+        {
+            // 计算目标记录行的位置
+            size_t nCurOffset = m_nCurRec * m_oHeader.nRecLen + RecordOffset();
+            if (m_pFileBuf)
+            {
+                char* pData = m_pFileBuf + nCurOffset;
+                if (!memcpy(ptr, pData, size * nmemb))
+                {
+                    nRet = DBF_ERROR;
+                }
+                else
+                {
+                    nRet = nmemb;
+                }
+            }
+            else
+            {
+                // 切换到对应记录行，写入数据
+                fseek(m_pFile, nCurOffset, SEEK_SET);
+                return fwrite(ptr, size, nmemb, m_pFile);
+            }
+        }
+        // 写入
+        else if (m_pWriteBuf)
+        {
+            char* pData = m_pWriteBuf->Data() + (m_nCurRec - m_oHeader.nRecNum)*m_oHeader.nRecLen;
+            if (!memcpy(pData, ptr, size * nmemb))
+            {
+                nRet = DBF_ERROR;
+            }
+            else
+            {
+                nRet = nmemb;
+            }
+        }
+        else
+        {
+            nRet = DBF_PARA_ERROR;
+        }
+
+        return nRet;
+    }
+    // 写入文件结束标志
+    size_t WriteEndFlag()
+    {
+        int nRet = DBF_SUCC;
+        assert(IsOpen());
+        if (m_bReadOnly)
+        {
+            return DBF_PARA_ERROR;
+        }
+        const char cEndFlag = 0X1A;
+
+        // 计算目标位置
+        size_t nOffset = FileSize() - 1;
+        if (m_pFileBuf)
+        {
+            m_pFileBuf[nOffset] = cEndFlag;
+        }
+        else
+        {
+            // 切换到对应记录行，写入数据
+            fseek(m_pFile, nOffset, SEEK_SET);
+            if (fwrite(&cEndFlag, 1, 1, m_pFile) != sizeof(cEndFlag))
+            {
+                return DBF_ERROR;
+            }
+        }
 
         return nRet;
     }
@@ -693,9 +1244,39 @@ protected:
         return -1;
     }
 
+    // 写头数据到文件
+    int WriteHeader()
+    {
+        // 内存模式
+        if (m_pFileBuf)
+        {
+            if (!memcpy(m_pFileBuf, &m_oHeader, sizeof(m_oHeader)))
+            {
+                return DBF_ERROR;
+            }
+        }
+        else
+        {
+            fseek(m_pFile, 0, SEEK_SET);
+            if (fwrite(&m_oHeader, 1, sizeof(m_oHeader), m_pFile) != sizeof(m_oHeader))
+            {
+                return DBF_ERROR;
+            }
+        }
+        return DBF_SUCC;
+    }
+
+    size_t FileSize()
+    {
+        // 文件头 + 记录数据 + 文件尾巴
+        return m_oHeader.nHeaderLen + m_nRemarkLen + m_oHeader.nRecNum * m_oHeader.nRecLen + 1;
+    }
+
 private:
     // 文件对象
     FILE* m_pFile;
+    // 文件路径
+    std::string m_strFilePath;
     // 是否只读
     bool m_bReadOnly;
     // 文件头信息
@@ -708,17 +1289,118 @@ private:
     size_t m_nRemarkLen;
     // 当前行数
     size_t m_nCurRec;
+    // 空白字符
+    const char m_cBlank;
 
     // 文件缓存
     char* m_pFileBuf;
+    // 允许添加行数（仅限内存模式）
+    size_t m_nApeendMaxRec;
 
-    // 文件写记录行缓存
+    // 文件写记录行缓存（未保存到文件的数据）
     CRecordBuf* m_pWriteBuf;
-    // 文件读记录行缓存
+    // 文件读记录行缓存（仅用于读）
     CRecordBuf* m_pReadBuf;
+};
 
-    // 当前记录行
-    char* m_pCurRow;
+class CCMPDbf
+{
+public:
+    CCMPDbf()
+    {
+        m_nMaxRowDiffs = 128;
+        m_nMaxDiffs = 256;
+        m_nCurDiffs = 0;
+        m_nCurRowDiffs = 0;
+    }
+public:
+    // 比较的字段
+    std::vector<std::string> m_vecField;
+    // 行最大差异值
+    size_t m_nMaxRowDiffs;
+    // 差异最大值
+    size_t m_nMaxDiffs;
+    // 当前已发现的行差异
+    size_t m_nCurRowDiffs;
+    // 当前已发现的差异
+    size_t m_nCurDiffs;
+
+    // 比较两个BDF文件，差异则返回true
+    bool Cmp(const std::string& strFile1, const std::string& strFile2)
+    {
+        CPDbf oDbf1;
+        CPDbf oDbf2;
+
+        // 打开文件
+        oDbf1.Open(strFile1, true);
+        if (!oDbf1.IsOpen())
+        {
+            return false;
+        }
+        oDbf2.Open(strFile2, true);
+        if (!oDbf2.IsOpen())
+        {
+            oDbf1.Close();
+            return false;
+        }
+
+        // 读取字段并比较
+        size_t nRecNum1 = oDbf1.GetRecNum();
+        size_t nRecNum2 = oDbf1.GetRecNum();
+        size_t nRecNum = std::min(nRecNum1, nRecNum2);
+        size_t nReadNum = 10000;
+        m_nCurDiffs = 0;
+        m_nCurRowDiffs = 0;
+        bool bEq = false;
+        std::string strBuf1;
+        std::string strBuf2;
+        for (size_t i=0; i< nRecNum; i+= nReadNum)
+        {
+            // 计算读取行数
+            nReadNum = std::min(nReadNum, nRecNum - i);
+
+            // 读取行
+            if (oDbf1.Read(i, nReadNum) || oDbf2.Read(i, nReadNum))
+            {
+                return false;
+            }
+
+            // 字段比较
+            for (size_t j = 0; j < nReadNum; j++)
+            {
+                bEq = true;
+                oDbf1.ReadGo(i + j);
+                oDbf2.ReadGo(i + j);
+                for (size_t k=0; k<m_vecField.size(); k++)
+                {
+                    strBuf1 = strBuf2 = "";
+                    oDbf1.ReadString(m_vecField[k], strBuf1);
+                    oDbf2.ReadString(m_vecField[k], strBuf2);
+                    if (CIDbf::Trim(strBuf1) != CIDbf::Trim(strBuf2))
+                    {
+                        m_nCurDiffs++;
+                        bEq = false;
+                    }
+                }
+                if (!bEq)
+                {
+                    m_nCurRowDiffs++;
+                }
+            }
+        }
+        
+        // 行差异
+        if (nRecNum1 != nRecNum2)
+        {
+            size_t nLineDiff = (std::max(nRecNum1, nRecNum2) - std::min(nRecNum1, nRecNum2));
+            m_nCurRowDiffs += nLineDiff;
+            m_nCurDiffs += (m_vecField.size() * nLineDiff);
+        }
+        oDbf1.Close();
+        oDbf2.Close();
+
+        return (m_nCurDiffs == 0 && m_nMaxDiffs == 0);
+    }
 };
 
 #endif

@@ -30,3 +30,94 @@ for (size_t j = 0; j < nRead; j++)
     oDbf.ReadString("ADDR", strValue);
 }
 ```
+
+2.批量写
+```cpp
+// 打开文件
+CPDbf oDbf1;
+if (oDbf1.Open(strDst, false))
+{
+    printf("打开DBF文件失败\n");
+    return;
+}
+
+// 清空DBF文件
+if (oDbf1.Zap())
+{
+    printf("清空DBF文件失败\n");
+    return;
+}
+
+
+// 打开数据源
+CPDbf oDbf2;
+if (oDbf2.Open(strSrc, true))
+{
+    printf("打开DBF文件失败\n");
+    return;
+}
+
+// 读取拷贝数据
+size_t nFieldNum = oDbf2.GetFieldNum();
+size_t nRecNum = oDbf2.GetRecNum();
+size_t nReadNum = 100;
+string strField;
+size_t nSucc = 0;
+for (size_t i = 0; i < nRecNum; i += nReadNum)
+{
+    nReadNum = min(nReadNum, nRecNum - i);
+    if (oDbf2.Read(i, nReadNum))
+    {
+        printf("读取记录失败:%d,%d", i, nReadNum);
+        continue;
+    }
+    if (oDbf1.PrepareAppend(nReadNum))
+    {
+        printf("预追加数据失败:%d", nReadNum);
+        continue;
+    }
+
+    // 字段拷贝
+    for (size_t j = 0; j < nReadNum; j++)
+    {
+        if (oDbf2.ReadGo(j))
+        {
+            printf("设置读缓存行指针失败:%d\n", j);
+            continue;
+        }
+        if (oDbf1.WriteGo(j))
+        {
+            printf("设置写缓存行指针失败:%d\n", j);
+            continue;
+        }
+        for (size_t k = 0; k < nFieldNum; k++)
+        {
+            if (oDbf2.ReadString(k, strField))
+            {
+                printf("读字段失败\n");
+                continue;
+            }
+            if (oDbf1.WriteString(k, strField))
+            {
+                printf("写字段失败\n");
+                continue;
+            }
+        }
+    }
+
+    // 写缓存提交
+    if (oDbf1.WriteCommit())
+    {
+        printf("写缓存提交失败\n");
+    }
+    else
+    {
+        printf("已提交缓存数:%d\n", nSucc += nReadNum);
+    }
+}
+// 文件提交
+if (oDbf1.FileCommit())
+{
+    printf("文件提交失败");
+}
+```
