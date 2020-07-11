@@ -1,3 +1,26 @@
+/*
+ * Copyright 2020 Arbboter
+ *
+ *     #    ######  ######  ######  ####### ####### ####### ######  
+ *    # #   #     # #     # #     # #     #    #    #       #     # 
+ *   #   #  #     # #     # #     # #     #    #    #       #     # 
+ *  #     # ######  ######  ######  #     #    #    #####   ######  
+ *  ####### #   #   #     # #     # #     #    #    #       #   #   
+ *  #     # #    #  #     # #     # #     #    #    #       #    #  
+ *  #     # #     # ######  ######  #######    #    ####### #     # 
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #ifndef __P_DBF_H__
 #define __P_DBF_H__
 #include <stdio.h>
@@ -306,18 +329,18 @@ public:
         }
         int nRet = DBF_ERROR;
         // 计算目标记录行的位置
-        size_t nCurOffset = nRecNo * m_oHeader.nRecLen + RecordOffset();
+        TDbfField& oField = m_vecField[nCol];
+        size_t nCurOffset = RecordOffset() + nRecNo * m_oHeader.nRecLen + oField.nPosition;
         // 切换到对应文件记录行
-        CRecordBuf oBuf(1, m_oHeader.nRecLen);
+        char* pField = new char[oField.nPosition];
         fseek(m_pFile, nCurOffset, SEEK_SET);
-        size_t nRead = fread(oBuf.Data(), 1, m_oHeader.nRecLen, m_pFile);
-        if (nRead == m_oHeader.nRecLen)
+        size_t nRead = fread(pField, 1, oField.cLength, m_pFile);
+        if (nRead == oField.cLength)
         {
-            // 获取字段信息
-            char* pField = oBuf.Data() + m_vecField[nCol].nPosition;
-            strValue = std::string(pField, m_vecField[nCol].cLength);
+            strValue = std::string(pField, oField.cLength);
             nRet = DBF_SUCC;
         }
+        delete[] pField;
         return nRet;
     }
     // 在文件后追加记录数，nAppendNum指定新增的行数
@@ -355,16 +378,22 @@ public:
     // 写字符串字段数据 
     virtual int WriteField(size_t nRecNo, size_t nCol, const std::string& strValue)
     {
-        if (!IsOpen() || nRecNo >= m_oHeader.nRecNum || nCol >= m_vecField.size())
+        if (!IsOpen() || nRecNo >= m_oHeader.nRecNum || nCol >= m_vecField.size() || m_bReadOnly)
         {
             return DBF_PARA_ERROR;
         }
         // 计算目标记录行的位置
-        size_t nCurOffset = RecordOffset() + nRecNo * m_oHeader.nRecLen  + m_vecField[nCol].nPosition;
+        TDbfField& oField = m_vecField[nCol];
+        size_t nCurOffset = RecordOffset() + nRecNo * m_oHeader.nRecLen  + oField.nPosition;
+        char* pField = new char[oField.cLength];
+        memset(pField, m_cBlank, oField.cLength);
+        memcpy(pField, strValue.c_str(), MMin(oField.cLength, strValue.size()));
         // 切换到对应文件记录行
         fseek(m_pFile, nCurOffset, SEEK_SET);
-        size_t nWrite = fwrite(strValue.c_str(), 1, m_vecField[nCol].cLength, m_pFile);
-        if (nWrite != m_vecField[nCol].cLength)
+        // 写字段数据
+        size_t nWrite = fwrite(pField, 1, oField.cLength, m_pFile);
+        delete[] pField;
+        if (nWrite != oField.cLength)
         {
             return DBF_ERROR;
         }
