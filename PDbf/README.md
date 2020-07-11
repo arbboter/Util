@@ -1,9 +1,11 @@
 # DBF库(header-only)
 支持DBF格式文件批量读写的C++库，使用原始的STL编写，使用C++标准语法
+内部使用内存缓存模式，可以支持高速的批量读写操作
 
 # 特性
 1.支持普通文件模式和内存模式，使用内存模式时所有操作均在内存完成，提升文件读写效率
 2.支持数据的批量读写操作
+3.支持直接操作文件接口（低性能）
 
 # 示例代码
 1.批量读：
@@ -120,4 +122,14 @@ if (oDbf1.FileCommit())
 {
     printf("文件提交失败");
 }
+```
+
+3.直接操作文件接口支持
+```cpp
+// 直接操作文件，性能低，记录号首行为0
+virtual std::string ReadString(size_t nRecNo, const std::string& strName) = NULL;
+virtual int WriteString(size_t nRecNo, const std::string& strName, const std::string& strValue) = NULL;
+virtual int ReadField(size_t nRecNo, size_t nCol, std::string& strValue) = NULL;
+virtual int Append(size_t nAppendNum) = NULL;
+virtual int WriteField(size_t nRecNo, size_t nCol, const std::string& strValue) = NULL;
 ```
