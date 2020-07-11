@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 Arbboter
+ * Copyright 2020 Arbboter email:arbboter@gmail.com
  *
  *     #    ######  ######  ######  ####### ####### ####### ######  
  *    # #   #     # #     # #     # #     #    #    #       #     # 
